@@ -1,0 +1,202 @@
+#### general settings
+
+name: Scshield_Train
+mode: train
+model: Scshield
+
+nbit: 64
+hide: True
+bithide: True
+degrade_shuffle: false
+prompt: True
+prompt_len: 3
+
+is_multi: True
+
+add_attak: false
+add_attak_step : 24
+use_moe: False
+use_gradient_clipping: True
+
+#### datasets
+datasets:
+  train:
+    name: coco
+    mode: train
+    # img_path: /home/shizhihao/datasets/coco2017/train2017
+    # ann_file: /home/shizhihao/datasets/coco2017/annotations/annotations/instances_train2017.json
+    img_path: /data02/shizhihao/datasets/coco/train2017
+    ann_file: /data02/shizhihao/datasets/coco/annotations/instances_train2017.json
+    # img_path: /mnt/h/dataset/coco2017/train2017
+    # ann_file: /mnt/h/dataset/coco2017/train2017/annotations/instances_train2017.json
+    image_size: 512
+    data_len: -1
+    use_shuffle: true
+    n_workers: 4
+    batch_size: 4
+  
+  val:
+    name: coco
+    mode: test
+    # img_path: /home/shizhihao/datasets/coco2017/val2017
+    # ann_file: /home/shizhihao/datasets/coco2017/annotations/annotations/instances_val2017.json
+    img_path: /data02/shizhihao/datasets/coco/val2017
+    ann_file: /data02/shizhihao/datasets/coco/annotations/instances_val2017.json
+
+    # img_path: /mnt/h/dataset/coco2017/train2017
+    # ann_file: /mnt/h/dataset/coco2017/train2017/annotations/instances_train2017.json
+    image_size: 512
+    data_len: 100
+    shuffle: false
+
+
+
+#### network structures
+
+masks:
+  kind: mixed
+  invert_proba: 0.5
+  irregular_proba: 0.25
+  box_proba: 0.25
+  full_proba: 0.25
+  segm_proba: 0.25
+
+net:
+  with_jnd: True
+  model: Scshield_net
+  resolution: 512
+
+  hide_net:
+    in_channels: 9
+    out_channels: 3
+
+  sec_net:
+    nbits: 64
+    hidden_size: 128
+    resolution: 512
+    pix_path_num : 2
+    sec_w : 8
+    sec_h : 8
+    sec_g_channels: 3
+    sec_p_channels: 4
+    is_mult_label : False
+    with_pos : True
+
+  extract_sec_net:
+    num_experts: 3
+    secret_dim: 64
+    use_pretrain: True
+    use_moe: false
+    use_shared_expert: True
+    moe_hidden_dim: 1024
+    out_dim: 512
+    shared_weight: 1.0
+    moe_type: 'soft'
+
+
+  tamper_net:
+    in_channels: 3
+    out_channels: 1
+    resolution: 512
+    pix_path_num : 2
+    sec_w : 8
+    sec_h : 8
+    is_multi: True
+    with_enhance: True
+
+
+
+
+  
+  block_num: [6, 6]
+  scale: 2
+  init: xavier_group
+  block_num_rbm: 8
+  block_num_trans: 4
+  unet_resolution: 512
+  unet_width: 32
+  unet_ndown: 4
+  unet_nmiddle: 1
+  unet_activ: silu
+  bit_de: resnet50
+
+#### path
+
+path:
+  pretrain_model_G: #/data02/shizhihao/Work/watermarknew/experiments/train_base/models/85000_G.pth
+  models: ckp/base
+  strict_load: true
+  resume_state: #experiments/train_base/training_state/85000.state
+
+
+#### training settings: learning rate scheme, loss
+
+train:
+
+  lr_G: !!float 1e-4 #5e-5
+  beta1: 0.9
+  beta2: 0.5
+  niter: 1000000
+  warmup_iter: -1  # no warm up
+  gradient_accumulation_steps: 1
+
+  lr_scheme: MultiStepLR
+  lr_steps: [30000, 100000, 250000] 
+  lr_gamma: 0.5
+
+  pixel_criterion_forw: l2
+  pixel_criterion_back: l1
+
+  manual_seed: 10
+
+  val_freq: !!float 5e3 #!!float 5e3
+
+  lambda_fit_forw: 1.
+  lambda_rec_back: 1
+  lambda_center: 0
+  lambda_msg: !!float 100 # 500000
+
+  progressive: False
+
+  weight_decay_G: !!float 1e-12
+  gradient_clipping: 20
+  stage: [20000, 30000, 60000]
+
+  pix_enhance_step: 40000
+  jnd_step: 30000
+  top_k_moe_step: 32 
+
+loss:
+  is_weight_bec: True
+  img_lpips_weight: 0.05
+  img_rec_weight: 1.0
+
+  sec_weight: 50
+  sec_weight_end: 0.2
+  sec_weight_step : 100000
+
+
+  moe_weight: 10
+  moe_weight_end: 0.1
+  moe_weight_step : 100000
+
+
+  mask_bce_weight: 10
+  mask_bce_weight_end: 1
+
+  mask_edge_weight: 25.0
+  mask_edge_weight_end: 2.5
+  mask_weight_step : 100000
+
+  sec_pix_weight: 10
+  sec_pix_weight_end: 1.0
+  sec_pix_weight_step: 100000
+  
+
+
+#### logger
+vae_path: /data02/shizhihao/Work/watermarknew/edit_methods/inpainting/BrushNet/data/ckpt/realisticVisionV60B1_v51VAE
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: !!float 20000

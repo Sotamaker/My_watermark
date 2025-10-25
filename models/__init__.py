@@ -1,0 +1,1 @@
+from .wmmodel import WatermarkModel
