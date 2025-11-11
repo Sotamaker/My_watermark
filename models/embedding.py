@@ -110,7 +110,9 @@ class PatchEmbed(nn.Module):
             self.register_buffer("pos_embed", torch.from_numpy(pos_embed).float().unsqueeze(0), persistent=persistent)
         else:
             self.pos_embed = None
-    
+        
+        self.norm = nn.LayerNorm(embed_dim, elementwise_affine=False, eps=1e-6)
+
 
     def cropped_pos_embed(self, height, width):
         """从最大表里裁剪出合适大小的 pos_embed"""
@@ -146,6 +148,7 @@ class PatchEmbed(nn.Module):
                 pos_embed = torch.from_numpy(pos_embed).float().unsqueeze(0).to(x.device)
             else:
                 pos_embed = self.pos_embed
+        x = self.norm(x)
         x = x + pos_embed
         return x
 
@@ -167,32 +170,32 @@ class SecEmbed(nn.Module):
         self.embed_dim = embed_dim
         self.sec_p_dim = sec_p_dim
         self.sec_linear = nn.Sequential(
-                nn.Linear(nbit, nbit * nbit),
+                nn.Linear(nbit, nbit * 16),
                 nn.ReLU(),
-                nn.Linear(nbit * nbit, nbit * nbit),
+                nn.Linear(nbit * 16, nbit * 16),
                 nn.ReLU(),
-                nn.Linear(nbit * nbit, embed_dim)
+                nn.Linear(nbit * 16, embed_dim)
             )
         
-        self.sec_pix_embedding =  torch.nn.Embedding(2, sec_p_dim)
+        #self.sec_pix_embedding =  torch.nn.Embedding(2, sec_p_dim)
         self.sec_tok_embedding =  torch.nn.Embedding(2*nbit, embed_dim)
         self.sec_tok_all_linear = nn.Linear(embed_dim, embed_dim)
         
     def forward(self, sec):
-        sec_pix_emb = self.sec_pix_embedding(sec)
-        sec_pix_emb = sec_pix_emb.reshape(-1, 8, 8, self.sec_p_dim)
-        sec_pix_emb = sec_pix_emb.repeat_interleave(2, dim=1).repeat_interleave(2, dim=2)
+        # sec_pix_emb = self.sec_pix_embedding(sec)
+        # sec_pix_emb = sec_pix_emb.reshape(-1, 8, 8, self.sec_p_dim)
+        # sec_pix_emb = sec_pix_emb.repeat_interleave(2, dim=1).repeat_interleave(2, dim=2)
 
         indices = 2 * torch.arange(sec.shape[-1]).to(sec.device)  # k: 0 2 4 ... 2k
         indices = indices.repeat(sec.shape[0], 1)  # b k
         sec_w_ind = (indices + sec).long()
         sec_tok_emb = self.sec_tok_embedding(sec_w_ind)
-        sec_tok_sum_emb = self.sec_tok_all_linear(sec_tok_emb.mean(dim=-2))
+        sec_pos_emb = self.sec_tok_all_linear(sec_tok_emb.mean(dim=-2))
 
 
         sec = 2 * (sec - 0.5)
-        sec_all_emb = self.sec_linear(sec)
-        return sec_all_emb, sec_pix_emb, sec_tok_emb, sec_tok_sum_emb
+        sec_cond_emb = self.sec_linear(sec)
+        return sec_pos_emb, sec_cond_emb, sec_tok_emb 
         
     # def get_bit_tok_emb(self, sec):
     #     indices = 2 * torch.arange(sec.shape[-1]).to(sec.device)  # k: 0 2 4 ... 2k
@@ -203,7 +206,7 @@ class SecEmbed(nn.Module):
 
 class PatchWithSecEmbed(nn.Module):
     
-    def __init__(self, width=512, height=512, patch_size=16, in_chans=3, sec_p_dim=3,
+    def __init__(self, width=512, height=512, patch_size=16, in_chans=3, sec_p_dim=0,
                  embed_dim=768, pos_embed_type="sincos", pos_embed_max_size=None, scale=1.0, extra_tokens=0):
         super().__init__()
         
@@ -234,9 +237,11 @@ class PatchWithSecEmbed(nn.Module):
             self.register_buffer("pos_embed", torch.from_numpy(pos_embed).float().unsqueeze(0), persistent=persistent)
         else:
             self.pos_embed = None
+        
+        self.norm = nn.LayerNorm(embed_dim, elementwise_affine=False, eps=1e-6)
 
         
-    def forward(self, x, sec_all_emb, sec_pix_emb):
+    def forward(self, x, sec_all_emb):
         """
         Args:
             x: (B, C, H, W) 图像
@@ -247,10 +252,10 @@ class PatchWithSecEmbed(nn.Module):
         B, C, height, width = x.shape
         h, w = height // self.patch_size, width // self.patch_size
 
-        #sec_all_emb, sec_pix_emb = self.sec_emb(sec)
-        sec_pix_emb = sec_pix_emb.repeat(1, h, w, 1)
+        # sec_all_emb, sec_pix_emb = self.sec_emb(sec)
+        # sec_pix_emb = sec_pix_emb.repeat(1, h, w, 1)
         
-        x = self.proj(torch.cat([x,sec_pix_emb.permute(0,3,1,2)],dim=1))                # (B, D, H/ps, W/ps)
+        x = self.proj(x)                # (B, D, H/ps, W/ps)
         x = x.flatten(2).transpose(1, 2)  # (B, N, D)
 
         if self.pos_embed_max_size:
@@ -262,7 +267,7 @@ class PatchWithSecEmbed(nn.Module):
                 pos_embed = torch.from_numpy(pos_embed).float().unsqueeze(0).to(x.device)
             else:
                 pos_embed = self.pos_embed
-        
+        x = self.norm(x)
         x = x + pos_embed + sec_all_emb[:, None, :]
         return x
     

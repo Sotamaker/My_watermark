@@ -69,6 +69,63 @@ class Attention(nn.Module):
         x = self.proj_drop(self.proj(x))
         return x
 
+
+class WeightAttention(nn.Module):
+    def __init__(self, dim, heads, attn_drop=0.0, proj_drop=0.0):
+        super().__init__()
+        assert dim % heads == 0
+        self.h = heads
+        self.d = dim // heads
+        self.scale = self.d ** -0.5
+        self.qkv = nn.Linear(dim, dim * 3)
+        self.proj = nn.Linear(dim, dim)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x, weight):
+        """
+        x: (B,N,D)
+        weight: (B,N,1) 可靠度 [0,1]
+        """
+        B, N, D = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.h, D // self.h)
+        q, k, v = qkv.unbind(2)  # (B,N,h,d)
+        q, k, v = q.permute(0,2,1,3), k.permute(0,2,1,3), v.permute(0,2,1,3)
+        # (B,h,N,d)
+
+        # 双向 gating
+        #weight_safe = weight.clamp(min=1e-3)
+        weight_safe = 0.1 + 0.9 * weight
+        q = q * weight_safe.unsqueeze(1)
+        k = k * weight_safe.unsqueeze(1)
+
+        # 注意力
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+
+        # Key bias: 每个key的可靠度降低被看见的概率
+        attn = attn + 0.5 * torch.log(weight_safe).unsqueeze(1).transpose(-1, -2)
+
+        attn = F.softmax(attn, dim=-1)
+        attn = self.attn_drop(attn)
+
+        out = (attn @ v).transpose(1, 2).reshape(B, N, D)
+        out = self.proj(out)
+        out = self.proj_drop(out)
+        return out
+
+    
+    # def forward(self, x, weight):
+    #     B, N, C = x.shape
+    #     qkv = self.qkv(x).reshape(B, N, 3, self.h, self.d).permute(2, 0, 3, 1, 4)
+    #     q, k, v = qkv[0], qkv[1], qkv[2]
+    #     attn = (q * self.scale) @ k.transpose(-2, -1)
+    #     attn = attn.softmax(-1)
+    #     attn = self.attn_drop(attn)
+    #     x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+    #     x = self.proj_drop(self.proj(x))
+    #     return x
+    
+
 class MLP(nn.Module):
     def __init__(self, dim, ratio=4.0, drop=0.0):
         super().__init__()
@@ -133,6 +190,58 @@ class MMDiTBlock(nn.Module):
 
 
 
+class MMWeightDiTBlock(nn.Module):
+    """
+    MMDiT 风格 Transformer 块:
+      - Attention: gate-only 调制
+      - MLP: scale + shift + gate 调制
+      - 使用 RMSNorm
+    """
+    def __init__(self, dim, cond_dim, heads, mlp_ratio=4.0, dropout=0.0):
+        super().__init__()
+        self.norm1 = RMSNorm(dim)
+        self.norm2 = RMSNorm(dim)
+        self.attn = WeightAttention(dim, heads, attn_drop=dropout, proj_drop=dropout)
+        self.mlp = MLP(dim, ratio=mlp_ratio, drop=dropout)
+
+        # 条件线性映射
+        self.to_gate1 = nn.Linear(cond_dim, dim)        # Attention: 只 gate
+        self.to_mod2  = nn.Linear(cond_dim, dim * 3)    # MLP: scale, shift, gate
+
+        nn.init.zeros_(self.to_gate1.weight)
+        nn.init.zeros_(self.to_gate1.bias)
+        nn.init.zeros_(self.to_mod2.weight)
+        nn.init.zeros_(self.to_mod2.bias)
+
+    def forward(self, x, cond=None, patch_weight=None):
+        """
+        x: (B, N, D)
+        cond: (B, cond_dim)
+        """
+        # --- Attention path: gate only ---
+        h = self.norm1(x)
+        attn_out = self.attn(h, patch_weight)
+        if cond is not None:
+            gate1 = self.to_gate1(cond)[:, None, :].tanh()  # (B,1,D)
+            x = x + gate1 * attn_out
+        else:
+            x = x + attn_out
+
+        # --- MLP path: scale, shift, gate ---
+        h = self.norm2(x)
+        if cond is not None:
+            scale, shift, gate2 = self.to_mod2(cond).chunk(3, dim=-1)
+            h = h * (1 + scale[:, None, :]) + shift[:, None, :]
+            mlp_out = self.mlp(h)
+            x = x + gate2[:, None, :].tanh() * mlp_out
+        else:
+            mlp_out = self.mlp(h)
+            x = x + mlp_out
+        
+        return x
+
+
+
 # ------------------------
 # 编码器：Watermark-DiT（单流联合注意）
 # ------------------------
@@ -146,7 +255,7 @@ class WatermarkDiTEncoder(nn.Module):
         patch_size: int = 16,
         num_patches: int = 1024,
         in_channels: int = 3,
-        sec_p_dim: int = 3,
+        sec_p_dim: int = 0,
         hidden: int = 768,
         depth: int = 12,
         heads: int = 12,
@@ -185,13 +294,14 @@ class WatermarkDiTEncoder(nn.Module):
         # 输出融合：Conv2d 替代残差
         self.fuse = nn.Conv2d(in_channels * 2, in_channels, kernel_size=1)
         self.out_gain = nn.Parameter(torch.tensor(0.0))  # 仍可留作调节强度
+        self.use_sec_tok = False
 
     def _build_cond(self, sec_emb: torch.Tensor):
         # t: (B,)  strength: (B,) in [0,1] 控制嵌入强度
         sec_emb = self.sec_mlp(sec_emb.float())
         return sec_emb
 
-    def forward(self, img: torch.Tensor, sec_all_emb: torch.Tensor, sec_pix_emb: torch.Tensor, sec_tok_emb: torch.Tensor, sec_tok_sum_emb: torch.Tensor):
+    def forward(self, img: torch.Tensor, sec_pos_emb: torch.Tensor, sec_cond_emb: torch.Tensor, sec_tok_emb: torch.Tensor):
         """
         x: (B,C,H,W) 原图
         bits: (B, bit_len) in {0,1}
@@ -201,11 +311,14 @@ class WatermarkDiTEncoder(nn.Module):
         """
         B, C, H, W = img.shape
 
-        img_tok = self.patchemb(img, sec_all_emb, sec_pix_emb)
+        img_tok = self.patchemb(img, sec_pos_emb)  #, sec_pix_emb
         # 拼接（单流联合注意）
-        tokens = torch.cat([img_tok, sec_tok_emb], dim=1)  # (B, N_img+L_bits, D)
+        if self.use_sec_tok:
+            tokens = torch.cat([img_tok, sec_tok_emb], dim=1)  # (B, N_img+L_bits, D)
+        else:
+            tokens = img_tok
 
-        cond = self._build_cond(sec_tok_sum_emb)
+        cond = self._build_cond(sec_cond_emb)
         for blk in self.blocks:
             tokens = blk(tokens, cond)
         tokens = self.final_proj(self.final_norm(tokens))
@@ -313,14 +426,25 @@ class WatermarkDiTDecoder(nn.Module):
         mlp_ratio: float = 4.0,
         nbit: int = 64,
         dropout: float = 0.0,
+        alpha: float = 3,
+        beta: float = 3.5,
+        T: float = 0.5,
+        topk_ratio: float=0,
         pos_embed_type: str = "sincos",   # "sincos" or "learned"
         pos_embed_max_size: Optional[int] = None,  # 若要支持裁剪
         scale: float = 1.0,               # 缩放位置坐标
         extra_tokens: int = 0,            # 预留额外token数
         use_cls_token: bool = True,
         use_learn_bit_probe: bool = True,
+        use_learn_cls_token: bool = False,
     ):
         super().__init__()
+
+        self.alpha = alpha
+        self.beta = beta
+        self.T = T
+        self.topk_ratio = topk_ratio
+        self.use_learn_cls_token = use_learn_cls_token
         # Patch embedding/unpatch
         self.patchemb = PatchEmbed(width=width, height=height, patch_size=patch_size, in_chans=in_channels,
                  embed_dim=hidden, pos_embed_type=pos_embed_type, pos_embed_max_size=pos_embed_max_size, scale=scale, extra_tokens=extra_tokens)
@@ -343,36 +467,41 @@ class WatermarkDiTDecoder(nn.Module):
 
 
         self.blocks = nn.ModuleList([
-            MMDiTBlock(hidden, self.cond_dim, heads, mlp_ratio,  dropout)
+            MMWeightDiTBlock(hidden, self.cond_dim, heads, mlp_ratio,  dropout)
             for _ in range(depth)
         ])
         
         self.final_norm = RMSNorm(hidden)
         self.final_proj = nn.Linear(hidden, hidden)
-        self.sce_patch_extract_head = nn.Sequential(nn.Linear(hidden, nbit * nbit * 2),
-                                 nn.SiLU(),
-                                 nn.Linear(nbit * nbit * 2, nbit * nbit + 1),
-                                 )
-        
-        self.sec_patch_pred_head = nn.Linear(nbit * nbit, nbit) 
 
-        self.sce_img_pred_head = nn.Sequential(
-                                nn.Conv2d(out_channels, 32, 3, stride=1, padding=1),
-                                nn.GroupNorm(num_groups=16, num_channels=32, affine=True),
-                                nn.SiLU(),
-                                nn.Conv2d(32, 4, 3,  stride=1, padding=1),
-                                nn.AdaptiveAvgPool2d(64),
-                                nn.Flatten(1),
-                                nn.Linear(64*64*4, nbit)
-                                )
-        
-        #self.aggregation_
-    
-        self.unpatch = Unpatchify(img_size, patch_size, out_channels, hidden)
-        
-        self.mask_pred_head = TamperLocalizationDiT(hidden,patch_size,img_size)
 
-        self.sig = nn.Sigmoid()
+        
+        d_local = hidden//2
+
+        
+        # 3. Local projection (水印latent特征)
+        self.local_proj = nn.Sequential(nn.Linear(hidden, hidden),
+                          nn.SiLU(),
+                         nn.Linear(hidden, d_local),
+        )
+        
+        self.saliency_head = nn.Sequential(
+            nn.LayerNorm(d_local),
+            nn.Linear(d_local, d_local//2),
+            nn.SiLU(),
+            nn.Linear(d_local//2, 1)
+        )
+
+        
+        self.logit_bias = nn.Parameter(torch.tensor(1.0))
+
+        # 5. Bit decoding head
+        self.sec_head = nn.Sequential(
+            nn.Linear(d_local, nbit * 4),
+            nn.GELU(),
+            nn.Linear(nbit * 4, nbit),
+        )
+
     
     def _build_cond(self, sec_emb: torch.Tensor):
         # t: (B,)  strength: (B,) in [0,1] 控制嵌入强度
@@ -380,7 +509,7 @@ class WatermarkDiTDecoder(nn.Module):
         return sec_emb
 
 
-    def forward(self, img: torch.Tensor):
+    def forward(self, img: torch.Tensor, patch_weight: torch.Tensor, is_training=True):
         """
         x: (B,C,H,W) 原图
         bits: (B, bit_len) in {0,1}
@@ -392,32 +521,51 @@ class WatermarkDiTDecoder(nn.Module):
 
         img_tok = self.patchemb(img)
         # 拼接（单流联合注意）
-        tokens = torch.cat([self.cls_token.expand(B, -1, -1), img_tok], dim=1)  # (B, N_img+L_bits, D)
-
+        if self.use_learn_cls_token:
+            tokens = torch.cat([self.cls_token.expand(B, -1, -1), img_tok], dim=1)  # (B, N_img+L_bits, D)
+        else:
+            tokens = img_tok
+        
         cond = self._build_cond(self.learned_bit_probe)
         for blk in self.blocks:
-            tokens = blk(tokens, cond)
-        tokens = self.final_proj(self.final_norm(tokens))
+            tokens = blk(tokens, cond, patch_weight)
+        
+        #tokens = self.final_proj(self.final_norm(tokens))
 
-        # 仅取回图像部分并重构
-        img_tokens_with_cls = tokens[:, : self.N_img + 1, :]
-        img_tokens = tokens[:, 1 : self.N_img + 1, :]
-        decode_sec_patch_info = self.sce_patch_extract_head(img_tokens_with_cls)
+        tokens = self.final_norm(tokens)
 
-        decode_sec_patch_weight = self.sig(decode_sec_patch_info[:,:,0])
-        decode_sec_patch_re_weight = decode_sec_patch_weight / decode_sec_patch_weight.sum(dim=1, keepdim=True)
+        # Local latent
+        tokens_local = self.local_proj(tokens)      # (B,N,d_local)
 
-        decode_sec_patch_feat = decode_sec_patch_info[:,:,1:]
-        weighted_mean = (decode_sec_patch_re_weight.unsqueeze(-1) * decode_sec_patch_feat).sum(dim=1)
 
-        decode_sec_patch = self.sec_patch_pred_head(weighted_mean)
+        # ---- Saliency branch ----
+        s = torch.tanh(self.saliency_head(tokens_local.detach()))  # (B,N,1)
 
-        delta = self.unpatch(img_tokens)  # (B,C,H,W)
-        decode_sec_img = self.sce_img_pred_head(delta)
+        # ---- 联合权重融合 (Joint-Attention) ----
+        s_prob = torch.sigmoid(self.beta * s)          # [-1,1] → [0,1]
+        joint = (patch_weight.detach() * s_prob).clamp(1e-4, 1.0) # 双高才高
+        logits = self.alpha * torch.log(joint) + self.logit_bias       # log 转换压缩
+        w = F.softmax(logits / self.T, dim=1)          # 温度控制稀疏度
 
-        decode_mask = self.mask_pred_head(img_tokens)
+        
 
-        return decode_sec_patch_weight, decode_sec_patch, decode_sec_img, decode_mask
+        # ---- 推理阶段: Top-k 聚合 ----
+        if not is_training and self.topk_ratio > 0:
+            k = int(self.N_img * self.topk_ratio)
+            vals, idx = torch.topk(w.squeeze(-1), k=k, dim=1)
+            mask = torch.zeros_like(w)
+            mask.scatter_(1, idx.unsqueeze(-1), 1.0)
+            w = w * mask
+            w = w / (w.sum(dim=1, keepdim=True) + 1e-6)
+
+        # ---- 聚合特征 + bit 解码 ----
+        f_global = (w * tokens_local).sum(dim=1)     # (B,d_local)
+        bit_pred = self.sec_head(f_global)      # (B,n_bits)
+
+        return bit_pred #, s, w
+    
+
+       
 
 
 
@@ -480,3 +628,4 @@ class SimpleAttacks(nn.Module):
 # ------------------------
 # 最小可运行训练样例
 # ------------------------
+

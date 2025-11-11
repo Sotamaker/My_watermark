@@ -4,7 +4,7 @@ name: Scshield_Train
 nbit: 64
 
 train_config:
-  output_dir: expsv1_100_nomask
+  output_dir: expsde
   logging_dir: logs
   
   learning_rate: 1e-4
@@ -23,10 +23,10 @@ train_config:
 
 
 log:
-  # log_step: 5
-  # view_step: 10
-  # val_step: 10
-  # save_step: 20
+  # log_step: 2
+  # view_step: 5
+  # val_step: 5
+  # save_step: 10
   log_step: 200
   view_step: 5000
   val_step: 5000
@@ -58,7 +58,7 @@ model:
   sec_emb_config:
     nbit: 64
     embed_dim: 768
-    sec_p_dim: 0
+    sec_p_dim: 3
 
   wm_enc_config:
     img_size: 512
@@ -67,9 +67,9 @@ model:
     patch_size: 16
     num_patches: 1024
     in_channels: 3
-    sec_p_dim: 0
+    sec_p_dim: 3
     hidden: 768
-    depth: 8
+    depth: 12
     heads: 12
     mlp_ratio: 4.0
     nbit: 64
@@ -78,7 +78,7 @@ model:
     scale: 1.0              # 缩放位置坐标
     extra_tokens: 0           # 预留额外token数
 
-  sec_dec_config:
+  wm_dec_config:
     img_size: 512
     width: 512
     height: 512
@@ -87,7 +87,7 @@ model:
     in_channels: 3
     out_channels: 8
     hidden: 768
-    depth: 8
+    depth: 12
     heads: 12
     mlp_ratio: 4.0
     nbit: 64
@@ -98,30 +98,12 @@ model:
     use_cls_token: True
     use_learn_bit_probe: True
 
-  mask_dec_config:
-    depth: [5, 8, 20, 7] # [3, 4, 10, 4]
-    embed_dim: [64, 128, 320, 512]
-    head_dim: 64
-    img_size: 512
-    s_blocks3: [8, 4, 2, 1]
-    s_blocks4: [2, 1]
-    mlp_ratio: 4
-
-
-
 masks:
   invert_proba: 0.5
   irregular_proba: 0.25
   box_proba: 0.25
   full_proba: 0.25
   segm_proba: 0.25
-
-mask2s:
-  invert_proba: 0.5
-  irregular_proba: 0.15
-  box_proba: 0.15
-  full_proba: 0.5
-  segm_proba: 0.2
 
 stage:
   stage1: 10000
@@ -144,7 +126,7 @@ loss:
     decay_steps: 100000
 
   sec_loss_weight:
-    start: 50.0
+    start: 100.0
     end: 0.25
     decay_steps: 200000
 
@@ -154,13 +136,13 @@ loss:
     decay_steps: 50000
 
   mask_loss_weight:
-    start: 0 # 5 #10
-    end: 0 #0.2 #0.2
+    start: 0 #10
+    end: 0 #0.2
     decay_steps: 200000
 
   edge_loss_weight:
-    start: 0 #5 # 10.0
-    end: 0 #0.5 # 1.0     # 不变
+    start: 0 # 10.0
+    end: 0 # 1.0     # 不变
     decay_steps: 200000
 
 

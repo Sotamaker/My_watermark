@@ -210,6 +210,11 @@ class MixedMaskEmbedder:
         kind = np.random.choice(len(self.probas), p=self.probas)
         gen = self.gens[kind]
         is_seg = False
+        is_tamper = True
+        if isinstance(gen, FullMaskEmbedder):
+            if random.random()<0.9:
+                is_tamper = False
+
         if isinstance(gen, CocoSegmentationMaskEmbedder):
             result = gen(masks)
             is_seg = True
@@ -224,7 +229,7 @@ class MixedMaskEmbedder:
         if verbose:
             print(f"kind = {kind}, result = {result.mean().item()}")
         
-        return result, is_seg
+        return result, is_tamper
 
 
 def get_mask_embedder(**kwargs):

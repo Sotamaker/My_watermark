@@ -4,7 +4,7 @@ name: Scshield_Train
 nbit: 64
 
 train_config:
-  output_dir: exps1
+  output_dir: expsv1de
   logging_dir: logs
   
   learning_rate: 1e-4
@@ -18,19 +18,19 @@ train_config:
   all_step: 1000000
 
   use_jnd: True
-  jnd_step: 50000
+  jnd_step: 200000
 
 
 
 log:
-  log_step: 20
-  view_step: 50
-  val_step: 50
-  save_step: 100
-  # log_step: 100
+  log_step: 5
+  view_step: 10
+  val_step: 40
+  save_step: 40
+  # log_step: 200
   # view_step: 5000
   # val_step: 5000
-  # save_step: 10000
+  # save_step: 40000
 
 #### datasets
 datasets:
@@ -58,7 +58,7 @@ model:
   sec_emb_config:
     nbit: 64
     embed_dim: 768
-    sec_p_dim: 3
+    sec_p_dim: 0
 
   wm_enc_config:
     img_size: 512
@@ -67,9 +67,9 @@ model:
     patch_size: 16
     num_patches: 1024
     in_channels: 3
-    sec_p_dim: 3
+    sec_p_dim: 0
     hidden: 768
-    depth: 12
+    depth: 8
     heads: 12
     mlp_ratio: 4.0
     nbit: 64
@@ -78,7 +78,7 @@ model:
     scale: 1.0              # 缩放位置坐标
     extra_tokens: 0           # 预留额外token数
 
-  wm_dec_config:
+  sec_dec_config:
     img_size: 512
     width: 512
     height: 512
@@ -87,7 +87,7 @@ model:
     in_channels: 3
     out_channels: 8
     hidden: 768
-    depth: 12
+    depth: 8
     heads: 12
     mlp_ratio: 4.0
     nbit: 64
@@ -98,6 +98,17 @@ model:
     use_cls_token: True
     use_learn_bit_probe: True
 
+  mask_dec_config:
+    depth: [5, 8, 20, 7] # [3, 4, 10, 4]
+    embed_dim: [64, 128, 320, 512]
+    head_dim: 64
+    img_size: 512
+    s_blocks3: [8, 4, 2, 1]
+    s_blocks4: [2, 1]
+    mlp_ratio: 4
+
+
+
 masks:
   invert_proba: 0.5
   irregular_proba: 0.25
@@ -105,13 +116,20 @@ masks:
   full_proba: 0.25
   segm_proba: 0.25
 
+mask2s:
+  invert_proba: 0.5
+  irregular_proba: 0.15
+  box_proba: 0.15
+  full_proba: 0.5
+  segm_proba: 0.2
+
 stage:
   # stage1: 10000
   # stage2: 20000
   # stage3: 100000
   stage1: 10
   stage2: 20
-  stage3: 50
+  stage3: 30
 
 #### path
 loss:
@@ -131,18 +149,18 @@ loss:
     decay_steps: 200000
 
   sec_patch_weight_loss_weight:
-    start: 0.0
-    end: 0.5
-    decay_steps: 20000
+    start: 0.5
+    end: 0.1
+    decay_steps: 50000
 
   mask_loss_weight:
-    start: 10
-    end: 0.2
+    start: 10 #10
+    end: 0.2 #0.2
     decay_steps: 200000
 
   edge_loss_weight:
-    start: 10.0
-    end: 1.0     # 不变
+    start: 5 # 10.0
+    end: 10 # 1.0     # 不变
     decay_steps: 200000
 
 
