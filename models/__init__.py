@@ -1,1 +1,1 @@
-from .wmmodel import WatermarkModel
+from .wmmodel import WatermarkModel,WatermarkModel1

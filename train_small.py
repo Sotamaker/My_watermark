@@ -35,7 +35,7 @@ def parse_args():
     parser.add_argument(
         "--config_path",
         type=str,
-        default='configs/trainv1de.yaml',
+        default='configs/trainv1_small_g.yaml',
         help='Path to Logger YMAL file.',
     )
     parser.add_argument(
@@ -58,7 +58,16 @@ def parse_args():
             ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
         ),
     )
-
+    parser.add_argument(
+        "--sec_type",
+        type=str,
+        default="only_global",#only_global only_patch
+        help=(
+            'The integration to report the results and logs to. Supported platforms are `"tensorboard"`'
+            ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
+        ),
+    )
+    
     parser.add_argument(
         "--grad_accum_steps",
         type=int,
@@ -258,8 +267,10 @@ def main():
 
 
             # extract            
-            pred_mask, pred_sec = wmmodel.extract(img_wm, mask_input)
+            pred_mask, bit_pred_global, bit_pred_patch, patch_weight, w= wmmodel.extract(img_wm, mask_input)
             
+            
+
 
             loss_weight_dict = lossweight_updater.get_loss_weight(step)          
 
@@ -275,7 +286,18 @@ def main():
 
             ## bit loss
 
-            sec_loss = BCE_loss(pred_sec, sec.float())
+            sec_loss_g = BCE_loss(bit_pred_global, sec.float())
+            sec_loss_p, bit_final_patch = patch_wise_loss(bit_pred_patch, sec.float(), patch_weight)
+
+            if args.sec_type == "only_global":
+                sec_loss = sec_loss_g
+            elif args.sec_type == "only_patch":
+                sec_loss = sec_loss_p
+            elif args.sec_type == "all":
+                sec_loss = sec_loss_g + 0.5 * sec_loss_p
+            else:
+                ValueError(f"Invalid mode: {args.sec_type}")
+
 
             ## mask loss
             mask_bce_loss = WbceLoss(pred_mask, mask)
@@ -310,11 +332,12 @@ def main():
 
                 avg_sec_loss = accelerator.gather(sec_loss.repeat(train_batchsize)).mean().item()
                 
-                pred_sec_bit = torch.round(torch.sigmoid(pred_sec))
+                pred_sec_bit_g = torch.round(torch.sigmoid(bit_pred_global))
                 
 
-                avg_bit_acc = accelerator.gather(((pred_sec_bit.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
-                
+                avg_bit_acc_g = accelerator.gather(((pred_sec_bit_g.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
+                avg_bit_acc_p = accelerator.gather(((bit_final_patch.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
+
                 if accelerator.is_main_process:
                     # config
                     writer.add_scalar("LR", lr, step)
@@ -336,7 +359,8 @@ def main():
                     writer.add_scalar("Loss_mask/mask_edge_loss", avg_mask_edge_loss, step)
 
 
-                    writer.add_scalar("Train_Bit_acc/avg_bit_acc", avg_bit_acc, step)
+                    writer.add_scalar("Train_Bit_acc/avg_bit_acc_g", avg_bit_acc_g, step)
+                    writer.add_scalar("Train_Bit_acc/avg_bit_acc_p", avg_bit_acc_p, step)
 
                     # log
                     msg = (
@@ -348,7 +372,8 @@ def main():
                         f"{'Sec_Loss:'}{avg_sec_loss:6.3f} | "
                         f"{'Mask_bce Loss:'}{avg_mask_bce_loss:6.3f} | "
                         f"{'Mask_edge Loss:'}{avg_mask_edge_loss:6.3f} | "
-                        f"{'Bit acc:'}{avg_bit_acc:6.3f}"
+                        f"{'Bit acc_g:'}{avg_bit_acc_g:6.3f}"
+                        f"{'Bit acc_p:'}{avg_bit_acc_p:6.3f}"
                     )
                     print(msg)
                     logger.info(msg)
@@ -365,11 +390,17 @@ def main():
                 avg_psnr = 0.0
                 avg_ssim = 0.0
 
-                avg_bit_acc_clean = 0.0
-                avg_bit_acc_noise = 0.0
-                avg_bit_acc_vae = 0.0
-                avg_bit_acc_fuse = 0.0
-                avg_bit_acc_fuse_noise = 0.0
+                avg_bit_acc_clean_p = 0.0
+                avg_bit_acc_noise_p = 0.0
+                avg_bit_acc_vae_p = 0.0
+                avg_bit_acc_fuse_p = 0.0
+                avg_bit_acc_fuse_noise_p = 0.0
+
+                avg_bit_acc_clean_g = 0.0
+                avg_bit_acc_noise_g = 0.0
+                avg_bit_acc_vae_g = 0.0
+                avg_bit_acc_fuse_g = 0.0
+                avg_bit_acc_fuse_noise_g = 0.0
                 
                 avg_iou = 0.0 
                 avg_f1 = 0.0
@@ -414,45 +445,50 @@ def main():
                             avg_ssim += accelerator.gather(ssim_val).mean().item()
 
 
-                            pred_mask_clean, pred_sec_clean  = wmmodel.extract(img_wm_clean, torch.zeros_like(mask).to(accelerator.device)) # .test(img_wm_clean)
+                            pred_mask, bit_pred_global, bit_pred_patch, patch_weight,w = wmmodel.test(img_wm_clean) #extract(img_wm_clean, torch.zeros_like(mask).to(accelerator.device)) #
 
-                            pred_sec_bit_clean = torch.round(torch.sigmoid(pred_sec_clean))
+
+                            pred_sec_bit_clean_g = torch.round(torch.sigmoid(bit_pred_global))
                             
-
-                            avg_bit_acc_clean += accelerator.gather(((pred_sec_bit_clean.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
+                            pred_sec_bit_clean_p =  patch_vote_bits(bit_pred_patch, patch_weight)
+                            avg_bit_acc_clean_g += accelerator.gather(((pred_sec_bit_clean_g.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
+                            avg_bit_acc_clean_p += accelerator.gather(((pred_sec_bit_clean_p.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
                             
 
 
                             img_wm_noise = apply_random_degradations_no_clean(img_wm_clean)
-                            pred_mask_noise, pred_sec_noise = wmmodel.extract(img_wm_noise, torch.zeros_like(mask).to(accelerator.device)) # test(img_wm_noise)
+                            pred_mask_noise, bit_pred_global_noise, bit_pred_patch_noise, patch_weight_noise ,w_noise = wmmodel.test(img_wm_noise) #extract(img_wm_noise, torch.zeros_like(mask).to(accelerator.device)) #
 
-                            pred_sec_bit_noise = torch.round(torch.sigmoid(pred_sec_noise))
+                            pred_sec_bit_noise_g = torch.round(torch.sigmoid(bit_pred_global_noise))
+                            pred_sec_bit_noise_p =  patch_vote_bits(bit_pred_patch_noise, patch_weight_noise)
                             
-                            avg_bit_acc_noise += accelerator.gather(((pred_sec_bit_noise.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
-                            
+                            avg_bit_acc_noise_g += accelerator.gather(((pred_sec_bit_noise_g.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
+                            avg_bit_acc_noise_p += accelerator.gather(((pred_sec_bit_noise_p.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
                             
 
                             with torch.no_grad():
                                 latents = vae.encode(img_wm_clean.half()).latent_dist.sample()
                                 img_wm_vae = vae.decode(latents, return_dict=False)[0].float()
-                            pred_mask_vae, pred_sec_vae = wmmodel.extract(img_wm_vae, torch.zeros_like(mask).to(accelerator.device)) #.test(img_wm_vae)
+                            pred_mask_vae, bit_pred_global_vae, bit_pred_patch_vae, patch_weight_vae ,w_vae= wmmodel.test(img_wm_vae) #extract(img_wm_vae, torch.zeros_like(mask).to(accelerator.device)) #
 
-                            pred_sec_bit_vae = torch.round(torch.sigmoid(pred_sec_vae))
-                            
+                            pred_sec_bit_vae_g = torch.round(torch.sigmoid(bit_pred_global_vae))
+                            pred_sec_bit_vae_p =  patch_vote_bits(bit_pred_patch_vae, patch_weight_vae)
 
-                            avg_bit_acc_vae += accelerator.gather(((pred_sec_bit_vae.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
+                            avg_bit_acc_vae_g += accelerator.gather(((pred_sec_bit_vae_g.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
+                            avg_bit_acc_vae_p += accelerator.gather(((pred_sec_bit_vae_p.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
                                         
 
                             img_wm_fuse = img_wm_clean * (1 - mask) + img * mask
 
-                            pred_mask_fuse, pred_sec_fuse = wmmodel.extract(img_wm_fuse, mask) #test(img_wm_fuse)
+                            pred_mask_fuse, bit_pred_global_fuse, bit_pred_patch_fuse, patch_weight_fuse ,w_fuse= wmmodel.test(img_wm_fuse) #extract(img_wm_fuse, mask) #
                             pred_mask_fuse = torch.sigmoid(pred_mask_fuse)
 
-                            pred_sec_bit_fuse = torch.round(torch.sigmoid(pred_sec_fuse))
-                            
+                            pred_sec_bit_fuse_g = torch.round(torch.sigmoid(bit_pred_global_fuse))
+                            pred_sec_bit_fuse_p =  patch_vote_bits(bit_pred_patch_fuse, patch_weight_fuse)
 
 
-                            avg_bit_acc_fuse += accelerator.gather(((pred_sec_bit_fuse.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
+                            avg_bit_acc_fuse_g += accelerator.gather(((pred_sec_bit_fuse_g.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
+                            avg_bit_acc_fuse_p += accelerator.gather(((pred_sec_bit_fuse_p.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
                             
 
 
@@ -466,14 +502,14 @@ def main():
 
                             img_wm_fuse_noise = apply_random_degradations_no_clean(img_wm_fuse)
 
-                            pred_mask_fuse_noise, pred_sec_fuse_noise = wmmodel.extract(img_wm_fuse_noise, mask) #.test(img_wm_fuse_noise)
+                            pred_mask_fuse_noise, bit_pred_global_fuse_nose, bit_pred_patch_fuse_noise, patch_weight_fuse_noise ,w_fuse_noise= wmmodel.test(img_wm_fuse_noise) #.extract(img_wm_fuse_noise, mask) #
                             pred_mask_fuse_noise = torch.sigmoid(pred_mask_fuse_noise)
 
-                            pred_sec_bit_fuse_noise = torch.round(torch.sigmoid(pred_sec_fuse_noise))
-                            
+                            pred_sec_bit_fuse_noise_g = torch.round(torch.sigmoid(bit_pred_global_fuse_nose))
+                            pred_sec_bit_fuse_noise_p =  patch_vote_bits(bit_pred_patch_fuse_noise, patch_weight_fuse_noise)
 
-                            avg_bit_acc_fuse_noise += accelerator.gather(((pred_sec_bit_fuse_noise.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
-                            
+                            avg_bit_acc_fuse_noise_g += accelerator.gather(((pred_sec_bit_fuse_noise_g.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
+                            avg_bit_acc_fuse_noise_p += accelerator.gather(((pred_sec_bit_fuse_noise_p.eq(sec.data)).sum()) / (train_batchsize * setting_config['nbit'])).mean().item()
 
 
                             iou_val_noise = compute_iou(pred_mask_fuse_noise, mask)
@@ -498,11 +534,17 @@ def main():
 
                     
 
-                    avg_bit_acc_clean = avg_bit_acc_clean / (val_step + 1)
-                    avg_bit_acc_noise = avg_bit_acc_noise / (val_step + 1)
-                    avg_bit_acc_vae = avg_bit_acc_vae / (val_step + 1)
-                    avg_bit_acc_fuse = avg_bit_acc_fuse / (val_step + 1)
-                    avg_bit_acc_fuse_noise = avg_bit_acc_fuse_noise / (val_step + 1)
+                    avg_bit_acc_clean_p = avg_bit_acc_clean_p / (val_step + 1)
+                    avg_bit_acc_noise_p = avg_bit_acc_noise_p / (val_step + 1)
+                    avg_bit_acc_vae_p = avg_bit_acc_vae_p / (val_step + 1)
+                    avg_bit_acc_fuse_p = avg_bit_acc_fuse_p / (val_step + 1)
+                    avg_bit_acc_fuse_noise_p = avg_bit_acc_fuse_noise_p / (val_step + 1)
+
+                    avg_bit_acc_clean_g = avg_bit_acc_clean_g / (val_step + 1)
+                    avg_bit_acc_noise_g = avg_bit_acc_noise_g / (val_step + 1)
+                    avg_bit_acc_vae_g = avg_bit_acc_vae_g / (val_step + 1)
+                    avg_bit_acc_fuse_g = avg_bit_acc_fuse_g / (val_step + 1)
+                    avg_bit_acc_fuse_noise_g = avg_bit_acc_fuse_noise_g / (val_step + 1)
 
                     avg_iou = avg_iou / (val_step + 1)
                     avg_f1 = avg_f1 / (val_step + 1)
@@ -511,18 +553,26 @@ def main():
                     avg_iou_noise = avg_iou_noise / (val_step + 1)
                     avg_f1_noise = avg_f1_noise / (val_step + 1)
                     avg_auc_noise = avg_auc_noise / (val_step + 1)
+                    avg_psnr = avg_psnr /  (val_step + 1)
+                    avg_ssim = avg_ssim /  (val_step + 1)
 
-                    
                     if accelerator.is_main_process:
 
                         writer.add_scalar("Val image/psnr", avg_psnr, step)
-                        writer.add_scalar("Val image/ssim", avg_psnr, step)
+                        writer.add_scalar("Val image/ssim", avg_ssim, step)
 
-                        writer.add_scalar("Val Sec /avg_bit_acc_clean", avg_bit_acc_clean, step)
-                        writer.add_scalar("Val Sec /avg_bit_acc_noise", avg_bit_acc_noise, step)
-                        writer.add_scalar("Val Sec /avg_bit_acc_vae", avg_bit_acc_vae, step)
-                        writer.add_scalar("Val Sec /avg_bit_acc_fuse", avg_bit_acc_fuse, step)
-                        writer.add_scalar("Val Sec /avg_bit_acc_fuse_noise", avg_bit_acc_fuse_noise, step)
+                        writer.add_scalar("Val Sec_g /avg_bit_acc_clean", avg_bit_acc_clean_g, step)
+                        writer.add_scalar("Val Sec_g /avg_bit_acc_noise", avg_bit_acc_noise_g, step)
+                        writer.add_scalar("Val Sec_g /avg_bit_acc_vae", avg_bit_acc_vae_g, step)
+                        writer.add_scalar("Val Sec_g /avg_bit_acc_fuse", avg_bit_acc_fuse_g, step)
+                        writer.add_scalar("Val Sec_g /avg_bit_acc_fuse_noise", avg_bit_acc_fuse_noise_g, step)
+
+                        
+                        writer.add_scalar("Val Sec_p /avg_bit_acc_clean", avg_bit_acc_clean_p, step)
+                        writer.add_scalar("Val Sec_p /avg_bit_acc_noise", avg_bit_acc_noise_p, step)
+                        writer.add_scalar("Val Sec_p /avg_bit_acc_vae", avg_bit_acc_vae_p, step)
+                        writer.add_scalar("Val Sec_p /avg_bit_acc_fuse", avg_bit_acc_fuse_p, step)
+                        writer.add_scalar("Val Sec_p /avg_bit_acc_fuse_noise", avg_bit_acc_fuse_noise_p, step)
 
                         writer.add_scalar("Val Mask F1/clean", avg_f1, step)
                         writer.add_scalar("Val Mask F1/noise", avg_f1_noise, step)
@@ -540,20 +590,27 @@ def main():
                                 step, avg_psnr, avg_ssim)
                         
                         msg2 = "Eval: " \
-                            "Step {:05d}, bit correct: {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} \n" \
+                            "Step {:05d}, bit correct_g: {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} \n" \
                             "-------------------------------------------------------------------------------------------------------------------------".format(
-                                step, avg_bit_acc_clean, avg_bit_acc_noise, avg_bit_acc_vae, avg_bit_acc_fuse, avg_bit_acc_fuse_noise)
-                        
+                                step, avg_bit_acc_clean_g, avg_bit_acc_noise_g, avg_bit_acc_vae_g, avg_bit_acc_fuse_g, avg_bit_acc_fuse_noise_g)
                         msg3 = "Eval: " \
+                            "Step {:05d}, bit correct_p: {:.3f} {:.3f} {:.3f} {:.3f} {:.3f} \n" \
+                            "-------------------------------------------------------------------------------------------------------------------------".format(
+                                step, avg_bit_acc_clean_p, avg_bit_acc_noise_p, avg_bit_acc_vae_p, avg_bit_acc_fuse_p, avg_bit_acc_fuse_noise_p)
+                        
+
+                        msg4 = "Eval: " \
                             "Step {:05d}, Iou F1 auc: {:.3f} | {:.3f} | {:.3f} | {:.3f} | {:.3f} | {:.3f}\n" \
                             "-------------------------------------------------------------------------------------------------------------------------".format(
                                 step, avg_iou, avg_f1, avg_auc, avg_iou_noise, avg_f1_noise,avg_auc_noise)
                         print(msg1)
                         print(msg2)
                         print(msg3)
+                        print(msg4)
                         logger.info(msg1)
                         logger.info(msg2)
                         logger.info(msg3)
+                        logger.info(msg4)
 
                         # ---------- 拼接保存图像 ----------
                     if len(collected_imgs) > 0:

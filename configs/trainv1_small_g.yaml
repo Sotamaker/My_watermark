@@ -4,7 +4,7 @@ name: Scshield_Train
 nbit: 64
 
 train_config:
-  output_dir: expsv1_100_nomaskwithjnd
+  output_dir: exps/expsv1samll_global1
   logging_dir: logs
   
   learning_rate: 1e-4
@@ -18,7 +18,7 @@ train_config:
   all_step: 1000000
 
   use_jnd: True
-  jnd_step: 10000
+  jnd_step: 10
 
 
 
@@ -27,10 +27,10 @@ log:
   # view_step: 10
   # val_step: 10
   # save_step: 20
-  log_step: 200
-  view_step: 5000
-  val_step: 5000
-  save_step: 40000
+  log_step: 100
+  view_step: 500
+  val_step: 1000
+  save_step: 10000
 
 #### datasets
 datasets:
@@ -38,7 +38,7 @@ datasets:
     img_path: /data02/shizhihao/datasets/coco/train2017
     ann_file: /data02/shizhihao/datasets/coco/annotations/instances_train2017.json
     image_size: 512
-    data_len: -1
+    data_len: 2000
     use_shuffle: true
     n_workers: 2
     batchsize: 2
@@ -58,7 +58,9 @@ model:
   sec_emb_config:
     nbit: 64
     embed_dim: 768
-    sec_p_dim: 0
+    mode: simple_mlp
+    return_patch_feat: true
+
 
   wm_enc_config:
     img_size: 512
@@ -95,7 +97,7 @@ model:
     pos_embed_type: sincos   # "sincos" or "learned"
     scale: 1.0           # 缩放位置坐标
     extra_tokens: 0            # 预留额外token数
-    use_cls_token: True
+    use_cls_token: false
     use_learn_bit_probe: True
 
   mask_dec_config:
@@ -144,9 +146,9 @@ loss:
     decay_steps: 100000
 
   sec_loss_weight:
-    start: 50.0
+    start: 25.0
     end: 0.25
-    decay_steps: 200000
+    decay_steps: 150000
 
   sec_patch_weight_loss_weight:
     start: 0.5
@@ -154,14 +156,14 @@ loss:
     decay_steps: 50000
 
   mask_loss_weight:
-    start: 0 # 5 #10
-    end: 0 #0.2 #0.2
-    decay_steps: 200000
+    start: 5 # 5 #10
+    end: 0.2 #0.2 #0.2
+    decay_steps: 150000
 
   edge_loss_weight:
-    start: 0 #5 # 10.0
-    end: 0 #0.5 # 1.0     # 不变
-    decay_steps: 200000
+    start: 5 #5 # 10.0
+    end: 0.5 #0.5 # 1.0     # 不变
+    decay_steps: 150000
 
 
 path:

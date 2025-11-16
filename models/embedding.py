@@ -290,3 +290,151 @@ class PatchWithSecEmbed(nn.Module):
 # 
 
 # c,d = Secemb.get_sec_emb(sec)
+
+
+
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class SecEmbeder(nn.Module):
+    """
+    Three modes:
+      - "simple_mlp":        bits → MLP → LN → scaled cond
+      - "positional_mlp":    bits → (bit_emb + pos_emb) seq → mean → MLP → LN
+      - "lookup_2nbit":      bits → Embedding(2*nbit) → mean → Linear → LN  (noisy, for ablation)
+    
+    返回两个值:
+      cond_emb: (B, D)   —— 给 DiT block 做 FiLM 调制用
+      token_emb: (B, L, D)  —— 若你需要额外把 bit token 拼到 patch token（可选，用不到给 None）
+    """
+
+    def __init__(self, nbit=64,
+                 embed_dim=768,
+                 mode="simple_mlp",
+                 return_patch_feat: bool = False,
+                 ):
+        super().__init__()
+        self.nbit = nbit
+        self.embed_dim = embed_dim
+        self.mode = mode
+        self.return_patch_feat = return_patch_feat
+
+        
+        
+        # -------------------------
+        # Mode 1: bits → simple MLP
+        # -------------------------
+        
+        if mode == "simple_mlp":
+            self.mlp = nn.Sequential(
+            nn.Linear(nbit, embed_dim * 4),
+            nn.SiLU(),
+            nn.Linear(embed_dim * 4, embed_dim),
+        )
+        # --------------------------------------
+        # Mode 2: bits → (bit_emb + pos_emb) → MLP
+        # --------------------------------------
+        elif mode == "positional_mlp":
+            self.bit_emb = nn.Embedding(2, embed_dim)      # bit=0 or 1
+            self.pos_emb = nn.Embedding(nbit, embed_dim)   # position 0..L-1
+
+            self.mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 4),
+            nn.SiLU(),
+            nn.Linear(embed_dim * 4, embed_dim),
+            )
+
+        # --------------------------------------
+        # Mode 3: lookup table Embedding(2*nbit)
+        # --------------------------------------
+        elif mode == "lookup_2nbit":
+            self.lookup_emb = nn.Embedding(2 * nbit, embed_dim)  # 每个bit位置×取值=一个embedding
+            self.mlp = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 4),
+            nn.SiLU(),
+            nn.Linear(embed_dim * 4, embed_dim),
+            )
+        else:
+            raise ValueError(f"Invalid mode: {mode}")
+
+        
+        if return_patch_feat:
+            # patch_feat 也用一个小 MLP refine 一下
+            self.patch_refine = nn.Sequential(
+                nn.Linear(nbit, embed_dim * 4),
+                nn.SiLU(),
+                nn.Linear(embed_dim * 4, embed_dim),
+            )
+
+
+    def _return(self, cond: torch.Tensor, token_emb: torch.Tensor, bits):
+        if self.return_patch_feat:
+            bits_f = 2 * bits.float() - 1.0
+            patch_feat = self.patch_refine(bits_f)            # (B,D)
+        else:
+            patch_feat = None
+        return patch_feat, cond, token_emb
+
+
+    def forward(self, bits):
+        """
+        bits: (B, L) in {0,1}
+        返回:
+            cond_emb: (B, D)
+            token_emb: (B, L, D)  or  None
+        """
+
+        B, L = bits.shape
+        token_emb = None
+
+        # ====================================================
+        #                  Mode 1: simple MLP
+        # ====================================================
+        if self.mode == "simple_mlp":
+            bits_f = 2 * bits.float() - 1.0
+            cond = self.mlp(bits_f)               # (B,D)
+            return self._return(cond, token_emb, bits)
+
+        # ====================================================
+        #         Mode 2: position-aware embedding → MLP
+        # ====================================================
+        elif self.mode == "positional_mlp":
+            # bit token embedding
+            bit_token = self.bit_emb(bits)              # (B,L,D)
+
+            # position embedding
+            positions = torch.arange(L, device=bits.device)
+            pos_token = self.pos_emb(positions)         # (L,D)
+            pos_token = pos_token.unsqueeze(0).expand(B, L, -1)  # (B,L,D)
+
+            seq = bit_token + pos_token                 # (B,L,D)
+
+            pooled = seq.mean(dim=1)                    # (B,D)
+            cond = self.mlp(pooled)
+            return self._return(cond, token_emb, bits)# 若需要把 bit token 拼进去，可用 seq
+
+        # ====================================================
+        #                Mode 3: lookup 2*nbit
+        # ====================================================
+        elif self.mode == "lookup_2nbit":
+            # index trick: idx = 2*i + bit
+            idx_base = 2 * torch.arange(L, device=bits.device)   # (L,)
+            idx = idx_base.unsqueeze(0) + bits                   # (B,L)
+            idx = idx.long()
+
+            seq = self.lookup_emb(idx)                           # (B,L,D)
+            pooled = seq.mean(dim=1)                             # (B,D)
+            cond = self.mlp(pooled)
+            return self._return(cond, token_emb, bits)
+
+# Secember = SecEmbeder()
+
+
+
+# sec = torch.rand(2,64)
+
+# cond, token_emb, patch_feat = Secember(sec)

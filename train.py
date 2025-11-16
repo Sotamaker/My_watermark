@@ -34,7 +34,7 @@ def parse_args():
     parser.add_argument(
         "--config_path",
         type=str,
-        default='configs/trainv1.yaml',
+        default='configs/trainv1de.yaml',
         help='Path to Logger YMAL file.',
     )
     parser.add_argument(
@@ -205,10 +205,14 @@ def main():
 
             img_wm = wmmodel.hide(img,sec)
 
+            loss_weight_dict = lossweight_updater.get_loss_weight(step)
+
             if step > traing_config['jnd_step'] and traing_config['use_jnd']:
                 img_wm = wmmodel.apply_jnd(img, img_wm)
 
             is_fuse = False
+            if step < stage_config['stage2']:
+                loss_weight_dict['sec_patch_weight_loss_weight'] = 0.0
             if step > stage_config['stage2'] and random.random()< 0.8:
                 is_fuse = True
                 img_wm = img_wm * (1 - mask) + mask * img
@@ -231,7 +235,7 @@ def main():
 
             decode_mask = torch.sigmoid(decode_mask)
 
-            loss_weight_dict = lossweight_updater.get_loss_weight(step)
+            
 
             ## img loss 
             img_lpips_loss = LPIPS_loss(img_wm, img.float().detach().clone()).mean()
@@ -263,7 +267,7 @@ def main():
             accelerator.backward(loss)
 
             if accelerator.sync_gradients:
-                accelerator.clip_grad_norm_(list(wmmodel.parameters()), 5.0)
+                accelerator.clip_grad_norm_(list(wmmodel.parameters()), 10.0)
             optimizer.step()
             optimizer.zero_grad()
             lr_scheduler.step()
@@ -413,7 +417,7 @@ def main():
                             
 
                             with torch.no_grad():
-                                latents = vae.encode(img_wm.half()).latent_dist.sample()
+                                latents = vae.encode(img_wm_clean.half()).latent_dist.sample()
                                 img_wm_vae = vae.decode(latents, return_dict=False)[0].float()
                             _, decode_sec_patch_vae, decode_sec_img_vae, _ = wmmodel.extract(img_wm_vae)
 
@@ -539,8 +543,8 @@ def main():
                         logger.info(msg3)
 
                         result_images = torch.cat([img[:train_batchsize], 
-                                                img_wm[:train_batchsize], 
-                                                ((img_wm - img) *10)[:train_batchsize],
+                                                img_wm_clean[:train_batchsize], 
+                                                ((img_wm_clean - img) *10)[:train_batchsize],
                                                 mask.repeat(1, 3, 1, 1)[:train_batchsize], 
                                                 decode_mask.repeat(1, 3, 1, 1)[:train_batchsize],
                                                 decode_mask_noise.repeat(1, 3, 1, 1)[:train_batchsize]],
@@ -549,7 +553,7 @@ def main():
             step += 1
 
             if step % log_config['save_step'] == 0:
-                save_path = os.path.join(traing_config['output_dir'], f"checkpoint")
+                save_path = os.path.join(traing_config['output_dir'], f"checkpoint_{step}")
                 accelerator.save_state(save_path, safe_serialization=False)
 
 
